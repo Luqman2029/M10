@@ -1,0 +1,360 @@
+#include <LiquidCrystal.h>
+
+LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
+
+// Motor pins (your layout)
+int IN1 = 13;
+int IN2 = A2;
+int IN3 = 2;
+int IN4 = 12;
+int ENA = 3; // Right motor PWM
+int ENB = 11; // Left motor PWM
+
+// Line sensors
+int L_S = A5; // Left sensor
+int R_S = A4; // Right sensor
+
+// Timer
+unsigned long previousMillis = 0;
+int seconds = 0, minutes = 0, hours = 0;
+
+// For black line detection
+unsigned long blackStart = 0;
+bool moving = true;
+
+// Debugging variables
+unsigned long lastDebugPrint = 0;
+const long debugInterval = 250; // Print debug every 250ms
+int debugCounter = 0;
+
+// ===== TURN DELAY VARIABLES =====
+unsigned long turnStartTime = 0;
+bool isTurning = false;
+const unsigned long TURN_EXTRA_DELAY = 300; // Adjust this value: 100-500ms
+
+// ===== NEW: DISTANCE MEASUREMENT VARIABLES =====
+unsigned long distanceStartTime = 0;
+float estimatedDistanceCm = 0.0;
+const float SPEED_CM_PER_SEC = 18.0; // Approximate speed in cm/s (ADJUST THIS!)
+bool reached100cm = false;
+unsigned long pauseStartTime = 0;
+bool isPaused = false;
+unsigned long pauseOffsetTime = 0; // Track time lost during pause
+// ==============================================
+
+void setup() {
+  // Initialize Serial for debugging
+  Serial.begin(9600);
+  
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT); pinMode(ENB, OUTPUT);
+
+  pinMode(L_S, INPUT);
+  pinMode(R_S, INPUT);
+
+  lcd.begin(16, 2);
+  lcd.print("Car Starting...");
+  
+  // Debug startup message
+  Serial.println("========================================");
+  Serial.println("LINE FOLLOWER WITH DISTANCE CHECK");
+  Serial.println("Serial baud: 9600");
+  Serial.println("========================================");
+  Serial.println("Format: [LS RS] Action | Time | Motor Speeds");
+  Serial.println("LS=Left Sensor, RS=Right Sensor (0=black, 1=white)");
+  Serial.println("========================================");
+  Serial.print("Turn extra delay: "); Serial.print(TURN_EXTRA_DELAY); Serial.println(" ms");
+  Serial.print("Target distance: 100cm");
+  Serial.print(" | Est. speed: "); Serial.print(SPEED_CM_PER_SEC); Serial.println(" cm/s");
+  Serial.println("========================================");
+  
+  delay(1000);
+  lcd.clear();
+  distanceStartTime = millis(); // Start distance measurement
+}
+
+void loop() {
+  int LS = !digitalRead(L_S); // 1=white, 0=black
+  int RS = !digitalRead(R_S);
+  
+  unsigned long currentMillis = millis();
+  
+  // ===== NEW: UPDATE ESTIMATED DISTANCE =====
+  if (moving && !isPaused) {
+    unsigned long elapsedTime = currentMillis - distanceStartTime - pauseOffsetTime;
+    estimatedDistanceCm = (elapsedTime / 1000.0) * SPEED_CM_PER_SEC;
+  }
+  
+  // ===== NEW: CHECK IF 100cm REACHED =====
+  if (!reached100cm && estimatedDistanceCm >= 100.0 && moving && !isPaused) {
+    reached100cm = true;
+    isPaused = true;
+    pauseStartTime = currentMillis;
+    stopMotors();
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("100cm Reached!");
+    lcd.setCursor(0, 1);
+    lcd.print("Wait 3 sec...");
+    
+    Serial.println("========================================");
+    Serial.println(">>> 100cm TARGET REACHED!");
+    Serial.print(">>> Time taken: ");
+    printTimeToSerial();
+    Serial.print(">>> Distance: ");
+    Serial.print(estimatedDistanceCm, 1);
+    Serial.println(" cm");
+    Serial.println(">>> Pausing for 3 seconds...");
+    Serial.println("========================================");
+  }
+  
+  // ===== NEW: CHECK IF PAUSE TIME IS OVER =====
+  if (isPaused && (currentMillis - pauseStartTime >= 3000)) {
+    isPaused = false;
+    // Add the pause time to offset so distance calculation continues correctly
+    pauseOffsetTime += (currentMillis - pauseStartTime);
+    
+    lcd.clear();
+    Serial.println(">>> 3-second pause completed");
+    Serial.println(">>> Resuming line following IMMEDIATELY");
+  }
+  
+  // If paused, don't process sensors
+  if (isPaused) {
+    // Update LCD during pause
+    if (currentMillis - lastDebugPrint >= 1000) {
+      lastDebugPrint = currentMillis;
+      lcd.setCursor(0, 1);
+      lcd.print("Wait ");
+      lcd.print(3 - ((currentMillis - pauseStartTime) / 1000));
+      lcd.print(" sec...   ");
+    }
+    return;
+  }
+  
+  // -------- DEBUG: PRINT SENSOR VALUES REGULARLY --------
+  if (currentMillis - lastDebugPrint >= debugInterval) {
+    lastDebugPrint = currentMillis;
+    
+    Serial.print("[");
+    Serial.print(LS);
+    Serial.print(" ");
+    Serial.print(RS);
+    Serial.print("] ");
+    
+    // Add motor speed info
+    Serial.print("ENA:");
+    Serial.print(analogRead(ENA)/4); // Convert 0-1023 to 0-255 for readability
+    Serial.print(" ENB:");
+    Serial.print(analogRead(ENB)/4);
+    Serial.print(" | Time: ");
+    printTimeToSerial();
+    
+    // ===== NEW: ADD DISTANCE INFO =====
+    Serial.print(" | Dist: ");
+    Serial.print(estimatedDistanceCm, 1);
+    Serial.print("cm");
+    
+    if (reached100cm) {
+      Serial.print(" (100cm reached)");
+    }
+    
+    Serial.print(" | Counter: ");
+    Serial.println(debugCounter);
+    
+    debugCounter++;
+  }
+
+  // -------- STOP IF BOTH BLACK (FINAL STOP) --------
+  if (LS == 0 && RS == 0) {
+    if (blackStart == 0) {
+      blackStart = millis();
+      Serial.println(">>> BOTH SENSORS ON BLACK - Starting stop timer");
+    }
+    
+    unsigned long blackTime = millis() - blackStart;
+    if (blackTime > 120) {
+      stopMotors();
+      moving = false;
+      lcd.clear();
+      
+      // ===== NEW: SHOW FINAL TIME AND DISTANCE =====
+      lcd.setCursor(0, 0);
+      lcd.print("Time: ");
+      printDigits(hours); lcd.print(":");
+      printDigits(minutes); lcd.print(":");
+      printDigits(seconds);
+      
+      lcd.setCursor(0, 1);
+      lcd.print("Dist: ");
+      lcd.print(estimatedDistanceCm, 1);
+      lcd.print("cm   ");
+      
+      // Debug message for stop
+      Serial.println("========================================");
+      Serial.println(">>> FINISH LINE DETECTED - STOPPED!");
+      Serial.print(">>> Total black time: ");
+      Serial.print(blackTime);
+      Serial.println(" ms");
+      Serial.print(">>> FINAL TIME: ");
+      printTimeToSerial();
+      Serial.println();
+      Serial.print(">>> TOTAL DISTANCE: ");
+      Serial.print(estimatedDistanceCm, 1);
+      Serial.println(" cm");
+      Serial.print(">>> 100cm checkpoint reached: ");
+      Serial.println(reached100cm ? "YES" : "NO");
+      Serial.println("========================================");
+      return;
+    }
+  } else {
+    if (blackStart != 0) {
+      Serial.println(">>> Black line lost, resuming");
+    }
+    blackStart = 0;
+  }
+
+  // -------- LINE FOLLOWING --------
+  if (moving && !isPaused) {
+    // ===== Check if we're in the middle of a delayed turn =====
+    if (isTurning) {
+      if (currentMillis - turnStartTime < TURN_EXTRA_DELAY) {
+        // Continue turning for the remaining delay time
+        return; // Skip sensor checking during the delay
+      } else {
+        // Turn delay finished
+        isTurning = false;
+        Serial.println(">>> Turn delay completed");
+      }
+    }
+    
+    if (LS == 1 && RS == 1) {
+      // Forward
+      moveForward();
+      lcd.setCursor(0, 0);
+      lcd.print("Forward        ");
+      
+      // ===== NEW: SHOW DISTANCE ON LCD =====
+      lcd.setCursor(0, 1);
+      lcd.print("Dist:");
+      lcd.print(estimatedDistanceCm, 0);
+      lcd.print("cm ");
+      
+      // Debug occasionally for forward motion
+      if (debugCounter % 10 == 0) {
+        Serial.println(">>> FORWARD: Both sensors on white");
+      }
+    } else if (LS == 0 && RS == 1) {
+      // Turn right slightly
+      turnRight();
+      lcd.setCursor(0, 0);
+      lcd.print("Turn Right     ");
+      
+      Serial.println("<<< TURN RIGHT: Left on black, Right on white");
+      
+      // ===== Start turn delay =====
+      isTurning = true;
+      turnStartTime = currentMillis;
+      Serial.print(">>> Starting right turn delay: ");
+      Serial.print(TURN_EXTRA_DELAY);
+      Serial.println(" ms");
+      
+    } else if (LS == 1 && RS == 0) {
+      // Turn left slightly
+      turnLeft();
+      lcd.setCursor(0, 0);
+      lcd.print("Turn Left      ");
+      
+      Serial.println(">>> TURN LEFT: Left on white, Right on black");
+      
+      // ===== Start turn delay =====
+      isTurning = true;
+      turnStartTime = currentMillis;
+      Serial.print(">>> Starting left turn delay: ");
+      Serial.print(TURN_EXTRA_DELAY);
+      Serial.println(" ms");
+      
+    } else {
+      // Both sensors off line (search)
+      stopMotors();
+      lcd.setCursor(0, 0);
+      lcd.print("Searching      ");
+      
+      Serial.println("!!! SEARCHING: Unexpected sensor state");
+    }
+  }
+
+  // -------- TIMER --------
+  if (moving && !isPaused && currentMillis - previousMillis >= 1000) {
+    previousMillis = currentMillis;
+    seconds++;
+    if (seconds >= 60) { seconds = 0; minutes++; }
+    if (minutes >= 60) { minutes = 0; hours++; }
+    if (hours >= 24) { hours = 0; }
+
+    // ===== NEW: ALTERNATE BETWEEN TIME AND DISTANCE =====
+    static bool showTime = true;
+    lcd.setCursor(0, 1);
+    
+    if (showTime) {
+      // Show time
+      printDigits(hours); lcd.print(":");
+      printDigits(minutes); lcd.print(":");
+      printDigits(seconds);
+      lcd.print("   ");
+    } else {
+      // Show distance
+      lcd.print("Dist:");
+      lcd.print(estimatedDistanceCm, 0);
+      lcd.print("cm ");
+    }
+    showTime = !showTime; // Toggle every second
+  }
+}
+
+// -------- MOTOR FUNCTIONS --------
+void moveForward() {
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  analogWrite(ENA, 120); // Right motor
+  analogWrite(ENB, 120); // Left motor
+}
+
+void turnLeft() {
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  analogWrite(ENA, 100);
+  analogWrite(ENB, 255);
+}
+
+void turnRight() {
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+  analogWrite(ENA, 255);
+  analogWrite(ENB, 100);
+}
+
+void stopMotors() {
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+}
+
+void printDigits(int digits) {
+  if (digits < 10) lcd.print("0");
+  lcd.print(digits);
+}
+
+// -------- DEBUG FUNCTIONS --------
+void printTimeToSerial() {
+  if (hours < 10) Serial.print("0");
+  Serial.print(hours);
+  Serial.print(":");
+  if (minutes < 10) Serial.print("0");
+  Serial.print(minutes);
+  Serial.print(":");
+  if (seconds < 10) Serial.print("0");
+  Serial.print(seconds);
+}
