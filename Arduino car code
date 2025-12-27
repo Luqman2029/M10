@@ -1,0 +1,119 @@
+#include <LiquidCrystal.h>
+
+LiquidCrystal lcd(8,9,4,5,6,7);
+
+int trigPin = A5;
+int echoPin = A4;
+
+int motor1pin1 = 13;
+int motor1pin2 = A2;
+int motor2pin1 = 2;
+int motor2pin2 = 12;
+
+int ENA = 3;
+int ENB = 11;
+
+float duration;
+float distance;
+
+// --- ADDED VARIABLES FOR OBSTACLE AVOIDANCE ---
+enum CarState {MOVING_FORWARD, TURNING, RESUMING};
+CarState carState = MOVING_FORWARD;
+unsigned long stateStartTime = 0;
+int turnDirection = 0;
+
+void setup(){
+  Serial.begin(9600);
+  lcd.begin(16,2);
+  lcd.print("Dist(cm): ");
+  
+  pinMode(motor1pin1, OUTPUT);
+  pinMode(motor1pin2, OUTPUT);
+  pinMode(motor2pin1, OUTPUT);
+  pinMode(motor2pin2, OUTPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+}
+
+void moveForward() {
+  analogWrite(ENA, 110);
+  analogWrite(ENB, 110);
+  digitalWrite(motor1pin1, LOW);
+  digitalWrite(motor1pin2, HIGH);
+  digitalWrite(motor2pin1, LOW);
+  digitalWrite(motor2pin2, HIGH);
+}
+
+void turnLeft() {
+  analogWrite(ENA, 90);  // Right motor faster
+  analogWrite(ENB, 60);  // Left motor slower
+  digitalWrite(motor1pin1, LOW);
+  digitalWrite(motor1pin2, HIGH);
+  digitalWrite(motor2pin1, HIGH);
+  digitalWrite(motor2pin2, LOW);
+}
+
+void turnRight() {
+  analogWrite(ENA, 60);  // Right motor slower
+  analogWrite(ENB, 90);  // Left motor faster
+  digitalWrite(motor1pin1, HIGH);
+  digitalWrite(motor1pin2, LOW);
+  digitalWrite(motor2pin1, LOW);
+  digitalWrite(motor2pin2, HIGH);
+}
+
+void loop()
+{
+  // Read sensor
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite (trigPin, LOW);
+  duration = pulseIn (echoPin, HIGH);
+  distance = (duration * 0.0343)/2;
+
+  Serial.print ("Distance ");
+  Serial.print(distance);
+  Serial.println(" cm");
+  lcd.setCursor(10,0); 
+  lcd.print(distance);
+  
+  // State machine for car behavior
+  switch(carState) {
+    case MOVING_FORWARD:
+      moveForward();
+      lcd.setCursor(0,1);
+      lcd.print("Moving forward  ");
+      
+      if (distance <= 20 && distance > 0) {
+        carState = TURNING;
+        stateStartTime = millis();
+        turnDirection = random(0, 2);
+        Serial.print("Obstacle! Turning ");
+        Serial.println(turnDirection == 0 ? "LEFT" : "RIGHT");
+      }
+      break;
+      
+    case TURNING:
+      if (turnDirection == 0) {
+        turnLeft();
+        lcd.setCursor(0,1);
+        lcd.print("Turning LEFT    ");
+      } else {
+        turnRight();
+        lcd.setCursor(0,1);
+        lcd.print("Turning RIGHT   ");
+      }
+      
+      // Turn for 1.5 seconds then resume
+      if (millis() - stateStartTime > 1500) {
+        carState = MOVING_FORWARD;
+        Serial.println("Resuming forward");
+      }
+      break;
+  }
+}
