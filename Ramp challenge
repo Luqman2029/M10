@@ -1,0 +1,366 @@
+#include <Wire.h>
+#include <LiquidCrystal.h>
+#include <MPU6050_light.h>
+
+// LCD pins with contrast control
+LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
+const int contrastPin = 10;  // Connect LCD V0 pin to pin 10 via potentiometer
+
+// Motor driver pins
+int IN1 = 13;
+int IN2 = A2;
+int IN3 = 2;
+int IN4 = 12;
+int ENA = 3;
+int ENB = 11;
+
+// MPU6050 object
+MPU6050 mpu(Wire);
+
+// Variables
+float maxAngle = 0;           // To store maximum angle reached
+float targetAngle = 15.0;     // Trigger angle (adjust as needed)
+boolean hasClimbed = false;   // Flag to track if ramp has been climbed
+boolean isClimbing = false;   // Flag to track climbing state
+boolean targetReached = false; // Flag when target angle is reached
+boolean showingMaxAngle = false; // Flag for showing max angle after climb
+boolean turn360Started = false; // Flag for 360° turn
+boolean turn360Complete = false; // Flag when 360° turn is done
+boolean forwardAfterTurnStarted = false; // Flag for 3-second forward move after turn
+boolean forwardAfterTurnComplete = false; // Flag when 3-second forward move is done
+boolean missionComplete = false; // Flag when mission is complete
+
+unsigned long startTime = 0;  // Time when movement started
+unsigned long targetTime = 0; // Time when target angle reached
+unsigned long maxAngleDisplayTime = 0; // Time when max angle display started
+unsigned long turnStartTime = 0; // Time when turn started
+unsigned long forwardStartTime = 0; // Time when forward move after turn started
+unsigned long stopTime = 0;   // Time when robot stopped
+const unsigned long displayTime = 5000; // Display angle for 5 seconds after stopping
+const unsigned long extraMoveTime = 1500;   // Extra 1.5-second move after target
+const unsigned long maxAngleDisplayDuration = 4000; // Show max angle for 4 seconds after climb
+const unsigned long turn360Time = 2500;     // Time for 360° turn (2.5 seconds)
+const unsigned long forwardAfterTurnTime = 3000; // 3-second forward move after turn
+
+void setup() {
+  // Set up LCD contrast (PWM control for brightness)
+  pinMode(contrastPin, OUTPUT);
+  analogWrite(contrastPin, 200);
+  
+  // Initialize Serial for debugging
+  Serial.begin(9600);
+  
+  // Initialize I2C communication
+  Wire.begin();
+  
+  // Initialize LCD
+  lcd.begin(16, 2);
+  lcd.print("Initializing...");
+  
+  // Initialize MPU6050
+  byte status = mpu.begin();
+  
+  if (status == 0) {
+    lcd.clear();
+    lcd.print("Calibrating...");
+    lcd.setCursor(0, 1);
+    lcd.print("Keep Flat!");
+    delay(2000);
+    
+    // Calibrate MPU (sensor must be flat during this!)
+    mpu.calcOffsets();
+    
+    lcd.clear();
+    lcd.print("Ready!");
+    delay(1000);
+    
+  } else {
+    lcd.clear();
+    lcd.print("MPU6050 Error!");
+    while (1);
+  }
+  
+  // Initialize motor pins
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  
+  // Start with motors stopped
+  stopMotors();
+  
+  lcd.clear();
+  lcd.print("Ready to Start");
+  lcd.setCursor(0, 1);
+  lcd.print("Target: ");
+  lcd.print(targetAngle, 0);
+  lcd.print(" deg");
+  delay(1000);
+}
+
+void loop() {
+  // Update MPU data - measures angle continuously
+  mpu.update();
+  
+  // Get current pitch angle (rotation around Y-axis)
+  float pitch = mpu.getAngleY();
+  
+  // Update maximum angle reached (always tracking)
+  if (pitch > maxAngle) {
+    maxAngle = pitch;
+  }
+  
+  // Debug output to Serial Monitor
+  Serial.print("Angle: ");
+  Serial.print(pitch, 1);
+  Serial.print("°  Max: ");
+  Serial.print(maxAngle, 1);
+  Serial.print("°  State: ");
+  
+  // STATE MACHINE LOGIC - FIXED SEQUENCE
+  if (!hasClimbed) {
+    // PHASE 1: RAMP CLIMB
+    handleRampClimb(pitch);
+  } 
+  else if (!showingMaxAngle) {
+    // Transition: Climb complete, prepare for max angle display
+    showingMaxAngle = true;
+    maxAngleDisplayTime = millis();
+    Serial.println("Starting max angle display");
+  }
+  else if (showingMaxAngle && (millis() - maxAngleDisplayTime < maxAngleDisplayDuration)) {
+    // PHASE 2: SHOW MAX ANGLE FOR 4 SECONDS (ONLY ANGLE, NO COUNTDOWN)
+    displayMaxAngleOnly();
+  }
+  else if (!turn360Complete) {
+    // PHASE 3: 360° TURN
+    handle360Turn();
+  }
+  else if (!forwardAfterTurnComplete) {
+    // PHASE 4: 3-SECOND FORWARD MOVE AFTER TURN
+    handleForwardAfterTurn();
+  }
+  else if (!missionComplete) {
+    // PHASE 5: MISSION COMPLETE - STOP AND DISPLAY
+    handleMissionComplete();
+  }
+  else {
+    // PHASE 6: FINAL DISPLAY
+    displayFinalResults();
+  }
+  
+  delay(50);
+}
+
+// PHASE 1: HANDLE RAMP CLIMB
+void handleRampClimb(float pitch) {
+  // Start initial forward movement (UNLIMITED APPROACH)
+  if (!isClimbing && !targetReached) {
+    startMoving();
+    isClimbing = true;
+    startTime = millis();
+    lcd.clear();
+    lcd.print("Moving Forward");
+    lcd.setCursor(0, 1);
+    lcd.print("Find ramp...");
+    Serial.println("STARTED - Moving & Measuring (Unlimited approach)");
+  }
+  
+  // Check if target angle (15°) is reached
+  if (isClimbing && !targetReached) {
+    if (pitch >= targetAngle) {
+      targetReached = true;
+      targetTime = millis();
+      Serial.print("TARGET REACHED! (");
+      Serial.print(pitch, 1);
+      Serial.println("°) - Starting 1.5s extra move");
+      
+      lcd.clear();
+      lcd.print("Ramp Detected!");
+      lcd.setCursor(0, 1);
+      lcd.print("Climbing...");
+    }
+  }
+  
+  // Extra 1.5-second move after target reached
+  if (isClimbing && targetReached) {
+    // REMOVED: displayExtraMoveCountdown(); // No extra time display
+    
+    // Check if 1.5 seconds have passed
+    if (millis() - targetTime >= extraMoveTime) {
+      // Time's up - stop motors (end of ramp climb)
+      stopMotors();
+      isClimbing = false;
+      hasClimbed = true;
+      
+      lcd.clear();
+      lcd.print("Max Angle:");
+      lcd.setCursor(0, 1);
+      lcd.print(maxAngle, 1);
+      lcd.print(" degrees");
+      
+      Serial.print("RAMP TOP REACHED. Max angle: ");
+      Serial.print(maxAngle, 1);
+      Serial.println("°");
+    }
+  }
+  
+  // Display during climb phase
+  if (isClimbing && !targetReached) {
+    displayDuringClimb(pitch);
+  }
+}
+
+// PHASE 2: DISPLAY MAX ANGLE ONLY (NO COUNTDOWN)
+void displayMaxAngleOnly() {
+  // Just show the maximum angle, no countdown or "Next in" message
+  lcd.clear();
+  lcd.print("Maximum Angle");
+  lcd.setCursor(0, 1);
+  lcd.print(maxAngle, 1);
+  lcd.print(" degrees");
+}
+
+// PHASE 3: HANDLE 360° TURN
+void handle360Turn() {
+  if (!turn360Started) {
+    // Start the turn
+    turn360Started = true;
+    turnStartTime = millis();
+    turn360(); // Start turning
+    
+    lcd.clear();
+    lcd.print("360 Turn");
+    Serial.println("Starting 360° turn");
+  }
+  
+  if (turn360Started && !turn360Complete) {
+    // Check if turn time has elapsed
+    if (millis() - turnStartTime >= turn360Time) {
+      // Stop turning
+      stopMotors();
+      turn360Complete = true;
+      
+      lcd.clear();
+      lcd.print("Turn Done");
+      Serial.println("360° turn complete");
+      delay(500);
+    }
+  }
+}
+
+// PHASE 4: HANDLE 3-SECOND FORWARD MOVE AFTER TURN
+void handleForwardAfterTurn() {
+  if (!forwardAfterTurnStarted) {
+    // Start forward movement
+    forwardAfterTurnStarted = true;
+    forwardStartTime = millis();
+    startMoving(); // Start moving forward
+    
+    lcd.clear();
+    lcd.print("Moving Forward");
+    Serial.println("Starting 3-second forward move after turn");
+  }
+  
+  if (forwardAfterTurnStarted && !forwardAfterTurnComplete) {
+    // Check if 3 seconds have passed
+    if (millis() - forwardStartTime >= forwardAfterTurnTime) {
+      // 3 seconds elapsed - STOP THE CAR
+      stopMotors();
+      forwardAfterTurnComplete = true;
+      missionComplete = true;
+      stopTime = millis();
+      
+      lcd.clear();
+      lcd.print("Mission Done");
+      Serial.println("3-second forward move complete - CAR STOPPED");
+    }
+    // REMOVED: No countdown display during forward move
+  }
+}
+
+// PHASE 5: HANDLE MISSION COMPLETE
+void handleMissionComplete() {
+  // Car is already stopped
+  // Just display completion message
+  static unsigned long lastUpdate = 0;
+  
+  if (millis() - lastUpdate > 1500) {
+    lastUpdate = millis();
+    
+    lcd.clear();
+    lcd.print("Complete");
+    lcd.setCursor(0, 1);
+    lcd.print("Max: ");
+    lcd.print(maxAngle, 1);
+    lcd.print(" deg");
+  }
+}
+
+// FUNCTION TO DISPLAY FINAL RESULTS
+void displayFinalResults() {
+  static unsigned long lastUpdate = 0;
+  
+  if (millis() - lastUpdate > 2000) {
+    lastUpdate = millis();
+    
+    lcd.clear();
+    lcd.print("Final:");
+    lcd.setCursor(0, 1);
+    lcd.print(maxAngle, 1);
+    lcd.print(" deg max");
+  }
+}
+
+// FUNCTION TO PERFORM 360° TURN
+void turn360() {
+  // Rotate clockwise (adjust directions for your robot)
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  
+  // Set turn speed (adjust as needed)
+  analogWrite(ENA, 180);
+  analogWrite(ENB, 180);
+}
+
+// FUNCTION TO DISPLAY DURING CLIMB
+void displayDuringClimb(float angle) {
+  static unsigned long lastUpdate = 0;
+  
+  if (millis() - lastUpdate > 500) {
+    lastUpdate = millis();
+    
+    lcd.clear();
+    lcd.print("Angle: ");
+    lcd.print(angle, 1);
+    lcd.print(" deg");
+    lcd.setCursor(0, 1);
+    lcd.print("Target: ");
+    lcd.print(targetAngle, 0);
+    lcd.print(" deg");
+  }
+}
+
+// FUNCTION TO START MOVING FORWARD
+void startMoving() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENA, 180);
+  analogWrite(ENB, 180);
+}
+
+// FUNCTION TO STOP MOTORS
+void stopMotors() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+}
