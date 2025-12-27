@@ -1,0 +1,147 @@
+// Bluetooth Car Control for Arduino with HC-05
+// Compatible with "Arduino Bluetooth Controller" app and similar
+// Motor connections for L298N or L293D driver
+
+// Define motor control pins
+#define ENA 3   // Enable pin for Motor A (PWM)
+#define IN1 13   // Motor A direction pin 1
+#define IN2 A2  // Motor A direction pin 2
+#define IN3 2   // Motor B direction pin 1
+#define IN4 12  // Motor B direction pin 2
+#define ENB 11   // Enable pin for Motor B (PWM)
+
+// For 4-wheel car (using 2 motor drivers or L298N dual channel)
+// Left motors: ENA, IN1, IN2
+// Right motors: ENB, IN3, IN4
+
+char command;     // Stores incoming Bluetooth command
+int speed = 150;  // Initial speed (0-255). Adjust as needed.
+
+void setup() {
+  // Set all motor control pins as outputs
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  
+  // Initialize Serial communication for HC-05 (default baud rate: 9600)
+  // HC-05 RX -> Arduino TX (through voltage divider!)
+  // HC-05 TX -> Arduino RX (direct connection)
+  Serial.begin(9600);
+  
+  // Set initial speed
+  analogWrite(ENA, speed);
+  analogWrite(ENB, speed);
+  
+  // Stop motors initially
+  stopCar();
+  
+  Serial.println("Bluetooth Car Ready!");
+  Serial.println("Send commands: F/B/L/R/S");
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    command = Serial.read();
+    Serial.print("Received: ");
+    Serial.println(command);
+    
+    // Execute command
+    switch(command) {
+      case 'F':  // Forward
+        moveForward();
+        break;
+      case 'B':  // Backward
+        moveBackward();
+        break;
+      case 'L':  // Left
+        turnLeft();
+        break;
+      case 'R':  // Right
+        turnRight();
+        break;
+      case 'S':  // Stop
+        stopCar();
+        break;
+      case '1':  // Speed: Very Slow
+        speed = 100;
+        updateSpeed();
+        break;
+      case '2':  // Speed: Slow
+        speed = 150;
+        updateSpeed();
+        break;
+      case '3':  // Speed: Medium
+        speed = 180;
+        updateSpeed();
+        break;
+      case '4':  // Speed: Fast
+        speed = 220;
+        updateSpeed();
+        break;
+      case '5':  // Speed: Very Fast
+        speed = 255;
+        updateSpeed();
+        break;
+    }
+  }
+}
+
+// Motor control functions
+void moveForward() {
+  // Left motors forward
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  // Right motors forward
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  Serial.println("Moving FORWARD");
+}
+
+void moveBackward() {
+  // Left motors backward
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  // Right motors backward
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  Serial.println("Moving BACKWARD");
+}
+
+void turnLeft() {
+  // Left motors backward
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  // Right motors forward
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  Serial.println("Turning LEFT");
+}
+
+void turnRight() {
+  // Left motors forward
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  // Right motors backward
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  Serial.println("Turning RIGHT");
+}
+
+void stopCar() {
+  // Stop all motors
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  Serial.println("STOPPED");
+}
+
+void updateSpeed() {
+  analogWrite(ENA, speed);
+  analogWrite(ENB, speed);
+  Serial.print("Speed set to: ");
+  Serial.println(speed);
+}
